@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { attachRequestId } = require('./utils/requestId');
 const logger = require('./config/logger');
 const taskRouter = require('./routes/task.routes');
+const scheduleRouter = require('./routes/schedule.routes');
 const { errorMiddleware } = require('./middleware/error.middleware');
 
 const app = express();
@@ -50,6 +51,9 @@ app.get('/health', (req, res) => {
 
 // Task routes
 app.use('/api/v1/tasks', taskRouter);
+
+// Schedule routes
+app.use('/api/v1/schedules', scheduleRouter);
 
 // 404 handler
 app.use((req, res) => {

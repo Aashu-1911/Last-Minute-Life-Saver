@@ -1,5 +1,5 @@
-const asyncHandler = require('../utils/asyncHandler');
-const taskService = require('../services/task.service');
+const asyncHandler = require("../utils/asyncHandler");
+const taskService = require("../services/task.service");
 
 /**
  * POST /api/v1/tasks
