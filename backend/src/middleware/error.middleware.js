@@ -9,7 +9,7 @@ const errorMiddleware = (err, req, res, next) => {
   const statusCode = err.statusCode || 500;
   const isProduction = process.env.NODE_ENV === 'production';
 
-  logger.error({
+  logger.error('Request error', {
     message: err.message,
     stack: err.stack,
     requestId: req.requestId,

@@ -111,18 +111,20 @@ test('task that exceeds deadline capacity is OVERDUE_RISK', () => {
   expect(totalScheduled).toBe(12);
 });
 
-// ─── 3. REVIEW_REQUIRED: estimatedHours = 150 ────────────────────────────────
+// ─── 3. REVIEW_REQUIRED: estimatedHours = 150 → NO blocks ───────────────────
 
-test('task with estimatedHours=150 is REVIEW_REQUIRED and still scheduled', () => {
+test('task with estimatedHours=150 is REVIEW_REQUIRED with zero blocks', () => {
   const task = makeTask({ estimatedHours: 150, deadline: '2030-01-01' });
   const { taskStatuses, summary, blocks } = generateSchedule([task], avail, opts);
 
   expect(taskStatuses[0].scheduleStatus).toBe('REVIEW_REQUIRED');
   expect(taskStatuses[0].reviewRequired).toBe(true);
-  expect(taskStatuses[0].reviewReason).toBe('High effort estimate');
+  expect(taskStatuses[0].reviewReason).toBe('ESTIMATE_EXCEEDS_MAXIMUM');
+  expect(taskStatuses[0].availableHours).toBeNull();
+  expect(taskStatuses[0].deficitHours).toBeNull();
   expect(summary.reviewRequiredTasks).toBe(1);
-  // Blocks must exist — task should still be scheduled
-  expect(blocks.length).toBeGreaterThan(0);
+  // REVIEW_REQUIRED tasks must NOT generate schedule blocks
+  expect(blocks.length).toBe(0);
 });
 
 // ─── 4. INVALID_ESTIMATE: estimatedHours > 500 ───────────────────────────────
@@ -224,17 +226,16 @@ test('summary.reviewRequiredTasks counts REVIEW_REQUIRED tasks', () => {
   expect(summary.reviewRequiredTasks).toBe(2);
 });
 
-// ─── 11. reviewRequiredTasks counted even when task is also OVERDUE_RISK ──────
+// ─── 11. REVIEW_REQUIRED never produces blocks regardless of deadline ────────
 
-test('REVIEW_REQUIRED + OVERDUE_RISK increments both counters', () => {
-  // 150h estimate (REVIEW_REQUIRED tier), deadline tomorrow → not enough capacity
+test('REVIEW_REQUIRED task with tight deadline still produces zero blocks', () => {
   const task = makeTask({ estimatedHours: 150, deadline: '2026-06-24' });
-  const { taskStatuses, summary } = generateSchedule([task], avail, opts);
+  const { taskStatuses, summary, blocks } = generateSchedule([task], avail, opts);
 
+  expect(taskStatuses[0].scheduleStatus).toBe('REVIEW_REQUIRED');
   expect(taskStatuses[0].reviewRequired).toBe(true);
-  expect(taskStatuses[0].scheduleStatus).toBe('OVERDUE_RISK');
-  expect(summary.overdueRiskTasks).toBe(1);
-  expect(summary.reviewRequiredTasks).toBe(1); // must not be 0
+  expect(summary.reviewRequiredTasks).toBe(1);
+  expect(blocks.length).toBe(0);
 });
 
 // ─── 12. reviewRequiredTasks === 1 for a single 150h task ────────────────────

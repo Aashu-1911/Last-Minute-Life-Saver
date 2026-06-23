@@ -40,7 +40,7 @@ app.use(express.json({ limit: '10kb' }));
 
 // Request logging
 app.use((req, res, next) => {
-  logger.info({ method: req.method, path: req.path, requestId: req.requestId });
+  logger.info('Incoming request', { method: req.method, path: req.path, requestId: req.requestId });
   next();
 });
 

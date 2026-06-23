@@ -16,16 +16,16 @@ const generateSchedule = asyncHandler(async (req, res) => {
  * GET /api/v1/schedules
  */
 const getAllSchedules = asyncHandler(async (req, res) => {
-  const schedule = await scheduleService.getAllSchedules();
-  res.status(200).json({ success: true, schedule });
+  const { schedule, summary, taskStatuses } = await scheduleService.getAllSchedules();
+  res.status(200).json({ success: true, schedule, summary, taskStatuses });
 });
 
 /**
  * GET /api/v1/schedules/task/:taskId
  */
 const getScheduleByTask = asyncHandler(async (req, res) => {
-  const schedule = await scheduleService.getScheduleByTask(req.params.taskId);
-  res.status(200).json({ success: true, schedule });
+  const { schedule, summary, taskStatuses } = await scheduleService.getScheduleByTask(req.params.taskId);
+  res.status(200).json({ success: true, schedule, summary, taskStatuses });
 });
 
 module.exports = { generateSchedule, getAllSchedules, getScheduleByTask };

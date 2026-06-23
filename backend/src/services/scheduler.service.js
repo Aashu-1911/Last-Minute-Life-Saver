@@ -9,12 +9,12 @@
 const formatTime = (hour) => {
   const h = Math.floor(hour);
   const m = Math.round((hour - h) * 60);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 };
 
 /** Returns "YYYY-MM-DD" for a base date string offset by N days. */
 const offsetDate = (base, days) => {
-  const d = new Date(base + 'T00:00:00.000Z');
+  const d = new Date(base + "T00:00:00.000Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 };
@@ -24,16 +24,16 @@ const offsetDate = (base, days) => {
  * e.g. today === deadline → 1 day.
  */
 const daysUntilDeadline = (todayStr, deadlineStr) => {
-  const today = new Date(todayStr + 'T00:00:00.000Z');
-  const deadline = new Date(deadlineStr + 'T00:00:00.000Z');
+  const today = new Date(todayStr + "T00:00:00.000Z");
+  const deadline = new Date(deadlineStr + "T00:00:00.000Z");
   const ms = deadline - today;
   return Math.max(0, Math.floor(ms / (1000 * 60 * 60 * 24)) + 1);
 };
 
 // ─── AI Estimate Policy ───────────────────────────────────────────────────────
 //
-// VALID           0.5 – 100      → schedule normally
-// REVIEW_REQUIRED 100 < h ≤ 500  → schedule, flag for human review
+// VALID           0.5 – 100       → schedule normally
+// REVIEW_REQUIRED 100 < h ≤ 500   → do NOT schedule, flag for human review
 // INVALID_ESTIMATE h ≤ 0 | > 500 | NaN → reject, no blocks
 
 const ESTIMATE_MIN = 0.5;
@@ -46,41 +46,46 @@ const ESTIMATE_REVIEW_MAX = 500;
  * @returns {'VALID' | 'REVIEW_REQUIRED' | 'INVALID_ESTIMATE'}
  */
 const classifyEstimate = (hours) => {
-  if (typeof hours !== 'number' || !isFinite(hours) || hours < ESTIMATE_MIN) {
-    return 'INVALID_ESTIMATE';
+  if (typeof hours !== "number" || !isFinite(hours) || hours < ESTIMATE_MIN) {
+    return "INVALID_ESTIMATE";
   }
-  if (hours <= ESTIMATE_VALID_MAX) return 'VALID';
-  if (hours <= ESTIMATE_REVIEW_MAX) return 'REVIEW_REQUIRED';
-  return 'INVALID_ESTIMATE';
+  if (hours <= ESTIMATE_VALID_MAX) return "VALID";
+  if (hours <= ESTIMATE_REVIEW_MAX) return "REVIEW_REQUIRED";
+  return "INVALID_ESTIMATE";
 };
 
-/**
- * Back-compat helper: returns true for the VALID range only.
- * Kept so existing unit tests that import this don't break.
- */
-const isValidEstimatedHours = (hours) => classifyEstimate(hours) === 'VALID';
+/** Back-compat: returns true for VALID range only. */
+const isValidEstimatedHours = (hours) => classifyEstimate(hours) === "VALID";
 
 // ─── Block Validator ──────────────────────────────────────────────────────────
 
 const REQUIRED_BLOCK_FIELDS = [
-  'taskId', 'taskTitle', 'date', 'startTime', 'endTime', 'durationHours', 'status',
+  "taskId",
+  "taskTitle",
+  "date",
+  "startTime",
+  "endTime",
+  "durationHours",
+  "status",
 ];
 
-/**
- * Throws if a block is malformed.
- * @param {object} block
- */
 const validateBlock = (block) => {
   for (const field of REQUIRED_BLOCK_FIELDS) {
-    if (block[field] === undefined || block[field] === null || block[field] === '') {
+    if (
+      block[field] === undefined ||
+      block[field] === null ||
+      block[field] === ""
+    ) {
       throw new Error(`Schedule block missing field: ${field}`);
     }
   }
   if (block.durationHours <= 0) {
-    throw new Error('Schedule block durationHours must be > 0');
+    throw new Error("Schedule block durationHours must be > 0");
   }
   if (block.endTime <= block.startTime) {
-    throw new Error(`Schedule block endTime (${block.endTime}) must be after startTime (${block.startTime})`);
+    throw new Error(
+      `Schedule block endTime (${block.endTime}) must be after startTime (${block.startTime})`,
+    );
   }
 };
 
@@ -89,30 +94,15 @@ const validateBlock = (block) => {
 /**
  * Generates a time-blocked schedule from tasks and a daily availability window.
  *
- * Status enum: SCHEDULED | OVERDUE_RISK | REVIEW_REQUIRED | UNSCHEDULED | INVALID_ESTIMATE
+ * Estimate policy:
+ *   VALID (0.5–100)           → scheduled normally
+ *   REVIEW_REQUIRED (100–500) → NOT scheduled; taskStatus = REVIEW_REQUIRED, reviewReason set
+ *   INVALID_ESTIMATE (>500|≤0)→ NOT scheduled; taskStatus = INVALID_ESTIMATE
  *
- * @param {Array<{
- *   taskId: string,
- *   priorityScore: number,
- *   estimatedHours: number,
- *   deadline: string,
- *   sanitizedTitle?: string,
- *   originalTitle?: string,
- *   taskTitle?: string,
- * }>} tasks
+ * @param {Array<object>} tasks
  * @param {{ startHour: number, endHour: number }} availability
- * @param {{ today?: string }} [options]  — today override for deterministic tests ("YYYY-MM-DD")
- * @returns {{
- *   blocks: object[],
- *   summary: {
- *     totalScheduledHours: number,
- *     overdueRiskTasks: number,
- *     unscheduledTasks: number,
- *     invalidTasks: number,
- *     reviewRequiredTasks: number
- *   },
- *   taskStatuses: object[]
- * }}
+ * @param {{ today?: string }} [options]
+ * @returns {{ blocks: object[], summary: object, taskStatuses: object[] }}
  */
 const generateSchedule = (tasks, availability, { today } = {}) => {
   const { startHour, endHour } = availability;
@@ -129,16 +119,16 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
     reviewRequiredTasks: 0,
   };
 
-  // ── 1. Classify estimate quality; separate invalids immediately ───────────
+  // ── 1. Classify all tasks; pull out non-schedulable ones immediately ──────
   const schedulableTasks = [];
 
   for (const task of tasks) {
     const tier = classifyEstimate(task.estimatedHours);
 
-    if (tier === 'INVALID_ESTIMATE') {
+    if (tier === "INVALID_ESTIMATE") {
       taskStatuses.push({
         taskId: task.taskId,
-        scheduleStatus: 'INVALID_ESTIMATE',
+        scheduleStatus: "INVALID_ESTIMATE",
         feasible: false,
         requiredHours: task.estimatedHours,
         availableHours: 0,
@@ -150,12 +140,32 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
       continue;
     }
 
-    schedulableTasks.push({ ...task, _estimateTier: tier });
+    if (tier === "REVIEW_REQUIRED") {
+      // Do NOT schedule — flag for human review, generate zero blocks
+      taskStatuses.push({
+        taskId: task.taskId,
+        scheduleStatus: "REVIEW_REQUIRED",
+        feasible: false,
+        requiredHours: task.estimatedHours,
+        availableHours: null, // not applicable — not a scheduling issue
+        deficitHours: null, // not applicable — not a scheduling issue
+        reviewRequired: true,
+        reviewReason: "ESTIMATE_EXCEEDS_MAXIMUM",
+        reviewRangeMin: ESTIMATE_MIN,
+        reviewRangeMax: ESTIMATE_VALID_MAX,
+      });
+      summary.reviewRequiredTasks += 1;
+      continue;
+    }
+
+    // VALID tier — proceed to scheduling
+    schedulableTasks.push(task);
   }
 
   // ── 2. Sort: higher priorityScore first, earlier deadline as tiebreaker ──
   schedulableTasks.sort((a, b) => {
-    if (b.priorityScore !== a.priorityScore) return b.priorityScore - a.priorityScore;
+    if (b.priorityScore !== a.priorityScore)
+      return b.priorityScore - a.priorityScore;
     return new Date(a.deadline) - new Date(b.deadline);
   });
 
@@ -164,29 +174,27 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
   let currentDayFilled = 0;
 
   for (const task of schedulableTasks) {
-    const title = task.taskTitle || task.sanitizedTitle || task.originalTitle || '';
+    const title =
+      task.taskTitle || task.sanitizedTitle || task.originalTitle || "";
     const deadlineStr = task.deadline.slice(0, 10);
-    const isReviewRequired = task._estimateTier === 'REVIEW_REQUIRED';
 
     const daysAvailable = daysUntilDeadline(todayStr, deadlineStr);
     const availableHours = dailyHours * daysAvailable;
     const schedulableHours = Math.min(task.estimatedHours, availableHours);
     const isOverdueRisk = task.estimatedHours > availableHours;
 
-    // Deadline already passed — nothing can be scheduled
     if (schedulableHours <= 0) {
       taskStatuses.push({
         taskId: task.taskId,
-        scheduleStatus: 'OVERDUE_RISK',
+        scheduleStatus: "OVERDUE_RISK",
         feasible: false,
         requiredHours: task.estimatedHours,
         availableHours: 0,
         deficitHours: task.estimatedHours,
-        reviewRequired: isReviewRequired,
-        reviewReason: isReviewRequired ? 'High effort estimate' : null,
+        reviewRequired: false,
+        reviewReason: null,
       });
       summary.overdueRiskTasks += 1;
-      if (isReviewRequired) summary.reviewRequiredTasks += 1;
       continue;
     }
 
@@ -194,15 +202,12 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
     let scheduledForTask = 0;
 
     while (remaining > 0) {
-      // Advance cursor to next day when current day is full
       if (currentDayFilled >= dailyHours) {
         dayOffset += 1;
         currentDayFilled = 0;
       }
 
       const blockDate = offsetDate(todayStr, dayOffset);
-
-      // Never write a block past the task deadline
       if (blockDate > deadlineStr) break;
 
       const dayAvailable = dailyHours - currentDayFilled;
@@ -217,12 +222,11 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
         startTime: formatTime(blockStart),
         endTime: formatTime(blockEnd),
         durationHours: blockHours,
-        status: 'PLANNED',
+        status: "PLANNED",
         priorityScoreAtGeneration: task.priorityScore,
       };
 
-      validateBlock(block); // throws on malformed data
-
+      validateBlock(block);
       blocks.push(block);
       scheduledForTask += blockHours;
       currentDayFilled += blockHours;
@@ -231,24 +235,15 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
 
     summary.totalScheduledHours += scheduledForTask;
 
-    // Determine final status for this task
     let scheduleStatus;
     if (scheduledForTask === 0) {
-      scheduleStatus = 'UNSCHEDULED';
+      scheduleStatus = "UNSCHEDULED";
       summary.unscheduledTasks += 1;
     } else if (isOverdueRisk) {
-      scheduleStatus = 'OVERDUE_RISK';
+      scheduleStatus = "OVERDUE_RISK";
       summary.overdueRiskTasks += 1;
-    } else if (isReviewRequired) {
-      scheduleStatus = 'REVIEW_REQUIRED';
     } else {
-      scheduleStatus = 'SCHEDULED';
-    }
-
-    // reviewRequiredTasks is independent of scheduleStatus —
-    // a task can be OVERDUE_RISK *and* reviewRequired simultaneously.
-    if (isReviewRequired) {
-      summary.reviewRequiredTasks += 1;
+      scheduleStatus = "SCHEDULED";
     }
 
     taskStatuses.push({
@@ -258,12 +253,13 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
       requiredHours: task.estimatedHours,
       availableHours,
       deficitHours: Math.max(0, task.estimatedHours - availableHours),
-      reviewRequired: isReviewRequired,
-      reviewReason: isReviewRequired ? 'High effort estimate' : null,
+      reviewRequired: false,
+      reviewReason: null,
     });
   }
 
-  summary.totalScheduledHours = Math.round(summary.totalScheduledHours * 100) / 100;
+  summary.totalScheduledHours =
+    Math.round(summary.totalScheduledHours * 100) / 100;
 
   return { blocks, summary, taskStatuses };
 };
@@ -274,4 +270,7 @@ module.exports = {
   isValidEstimatedHours,
   daysUntilDeadline,
   validateBlock,
+  ESTIMATE_MIN,
+  ESTIMATE_VALID_MAX,
+  ESTIMATE_REVIEW_MAX,
 };
