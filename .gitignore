@@ -1,0 +1,39 @@
+# ─── Kiro IDE files ──────────────────────────────────────────
+.kiro/
+
+# ─── Dependencies ───────────────────────────────────────────
+node_modules/
+**/node_modules/
+
+# ─── Environment variables ───────────────────────────────────
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# ─── Service account / secrets ───────────────────────────────
+serviceAccount.json
+serviceAccount.json.json
+**/serviceAccount*.json
+
+# ─── Logs ────────────────────────────────────────────────────
+logs/
+**/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Build output ────────────────────────────────────────────
+dist/
+build/
+
+# ─── OS / editor noise ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ─── Lock files (keep package-lock, ignore yarn.lock if unused)
+yarn.lock
