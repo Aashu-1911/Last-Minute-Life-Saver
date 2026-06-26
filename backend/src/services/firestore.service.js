@@ -42,4 +42,65 @@ const getAllTasks = async () => {
   }));
 };
 
-module.exports = { saveTask, getAllTasks };
+/**
+ * Updates an existing task document with the given fields.
+ * Always sets updatedAt to the current server timestamp.
+ * @param {string} taskId
+ * @param {object} fields
+ * @param {string} [requestId]
+ * @returns {Promise<object>} Updated fields with taskId
+ */
+const updateTask = async (taskId, fields, requestId) => {
+  logger.info('Firestore update start', { requestId, taskId });
+
+  await db.collection('tasks').doc(taskId).update({
+    ...fields,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  logger.info('Firestore update success', { requestId, taskId });
+
+  return { ...fields, taskId };
+};
+
+/**
+ * Retrieves up to `limit` recently completed tasks for a given category,
+ * ordered by createdAt descending.
+ * @param {string} category
+ * @param {number} limit
+ * @returns {Promise<object[]>}
+ */
+const getRecentCompletedByCategory = async (category, limit) => {
+  const snapshot = await db
+    .collection('tasks')
+    .where('status', '==', 'COMPLETED')
+    .where('category', '==', category)
+    .orderBy('createdAt', 'desc')
+    .limit(limit)
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    ...doc.data(),
+    taskId: doc.id,
+  }));
+};
+
+/**
+ * Stores the actual hours spent on a task after completion.
+ * @param {string} taskId
+ * @param {number} actualHours
+ * @param {string} [requestId]
+ * @returns {Promise<void>}
+ */
+const saveActualHours = async (taskId, actualHours, requestId) => {
+  logger.info('Firestore saveActualHours start', { requestId, taskId, actualHours });
+
+  await db.collection('tasks').doc(taskId).update({
+    actualHours,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  logger.info('Firestore saveActualHours success', { requestId, taskId });
+};
+
+module.exports = { saveTask, getAllTasks, updateTask, getRecentCompletedByCategory, saveActualHours };
