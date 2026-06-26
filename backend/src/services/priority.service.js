@@ -11,11 +11,13 @@ const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
  * @returns {number} Integer priority score 0–100
  */
 const calculatePriority = ({ deadline, importance, estimatedHours }) => {
-  const now = new Date();
-  const deadlineDate = new Date(deadline);
+  // Compare dates at midnight UTC to ensure deterministic results within the same day
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayMidnight = new Date(todayStr + 'T00:00:00Z');
+  const deadlineMidnight = new Date(deadline + 'T00:00:00Z');
 
   const msPerDay = 1000 * 60 * 60 * 24;
-  const deadlineDays = Math.max(0, Math.ceil((deadlineDate - now) / msPerDay));
+  const deadlineDays = Math.max(0, Math.round((deadlineMidnight - todayMidnight) / msPerDay));
 
   // 50% weight — closer deadline = higher score
   const deadlineScore = clamp(1 - deadlineDays / 30, 0, 1);

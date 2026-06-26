@@ -1,14 +1,20 @@
 const { Router } = require('express');
 const { validate } = require('../middleware/validation.middleware');
-const { taskSchema } = require('../validators/task.validator');
+const { taskSchema, previewSchema, approveSchema } = require('../validators/task.validator');
 const taskController = require('../controllers/task.controller');
 
 const router = Router();
 
-// POST /api/v1/tasks — validate then create
+// POST /api/v1/tasks/preview — generate AI plan without persisting
+router.post('/preview', validate(previewSchema), taskController.previewTask);
+
+// POST /api/v1/tasks/approve — persist the approved task
+router.post('/approve', validate(approveSchema), taskController.approveTask);
+
+// POST /api/v1/tasks — validate then create (existing endpoint, unchanged)
 router.post('/', validate(taskSchema), taskController.createTask);
 
-// GET /api/v1/tasks — return all tasks
+// GET /api/v1/tasks — return all tasks (existing endpoint, unchanged)
 router.get('/', taskController.getAllTasks);
 
 module.exports = router;
