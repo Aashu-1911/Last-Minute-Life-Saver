@@ -1,4 +1,5 @@
 import { useTaskContext } from '../context/TaskContext';
+import { TaskCreationProvider, useTaskCreationContext } from '../context/TaskCreationContext';
 import PageContainer from '../components/layout/PageContainer';
 import PageHeader from '../components/layout/PageHeader';
 import MetricCard from '../components/common/MetricCard';
@@ -8,8 +9,10 @@ import SkeletonCard from '../components/common/SkeletonCard';
 import TaskCard from '../components/tasks/TaskCard';
 import TaskCreationForm from '../components/tasks/TaskCreationForm';
 
-export default function Dashboard() {
+// Inner component — consumes TaskCreationContext for planThisTask
+function DashboardInner() {
   const { tasks, summary, taskStatuses, insights, loading, error, actions } = useTaskContext();
+  const { planThisTask } = useTaskCreationContext();
 
   const statusMap = Object.fromEntries(taskStatuses.map((s) => [s.taskId, s]));
   const taskMap = Object.fromEntries(tasks.map((t) => [t.taskId, t]));
@@ -249,7 +252,7 @@ export default function Dashboard() {
         ) : (
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-3">
             {tasks.map((task) => (
-              <TaskCard key={task.taskId} task={task} taskStatus={statusMap[task.taskId]} />
+              <TaskCard key={task.taskId} task={task} taskStatus={statusMap[task.taskId]} onPlanThisTask={planThisTask} />
             ))}
           </div>
         )}
@@ -264,5 +267,15 @@ export default function Dashboard() {
         </p>
       </div>
     </PageContainer>
+  );
+}
+
+// Wrap with TaskCreationProvider so TaskCreationForm and TaskCard share one
+// useTaskCreation instance — enabling "Plan this Task" to pre-fill the form.
+export default function Dashboard() {
+  return (
+    <TaskCreationProvider>
+      <DashboardInner />
+    </TaskCreationProvider>
   );
 }

@@ -121,8 +121,15 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
 
   // ── 1. Classify all tasks; pull out non-schedulable ones immediately ──────
   const schedulableTasks = [];
+  const frequencyTasks = [];
 
   for (const task of tasks) {
+    // Frequency/habit tasks (e.g. "Drink water 8x") get reminder slots, not time blocks
+    if (task.frequencyPerDay && task.frequencyPerDay > 0) {
+      frequencyTasks.push(task);
+      continue;
+    }
+
     const tier = classifyEstimate(task.estimatedHours);
 
     if (tier === "INVALID_ESTIMATE") {
@@ -169,13 +176,21 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
     return new Date(a.deadline) - new Date(b.deadline);
   });
 
-  // ── 3. Greedy scheduling — shared day cursor prevents inter-task overlap ──
-  let dayOffset = 0;
-  let currentDayFilled = 0;
+  // ── 3. Spread scheduling — per-task daily allocation across all available days ──
+  //
+  // Instead of a shared greedy cursor that packs Day 1 first, each task gets its own
+  // spread: hoursPerDay = estimatedHours / daysAvailable (capped at dailyHours).
+  // We track per-day usage in a map so multiple tasks share the same day window
+  // without overlap, and load is distributed across all days up to the deadline.
+
+  // dayUsed[dateStr] = hours already allocated on that date across all tasks
+  const dayUsed = {};
+
+  const getDayUsed = (dateStr) => dayUsed[dateStr] || 0;
+  const addDayUsed = (dateStr, h) => { dayUsed[dateStr] = (dayUsed[dateStr] || 0) + h; };
 
   for (const task of schedulableTasks) {
-    const title =
-      task.taskTitle || task.sanitizedTitle || task.originalTitle || "";
+    const title = task.taskTitle || task.sanitizedTitle || task.originalTitle || "";
     const deadlineStr = task.deadline.slice(0, 10);
 
     const daysAvailable = daysUntilDeadline(todayStr, deadlineStr);
@@ -198,29 +213,32 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
       continue;
     }
 
+    // Ideal hours per day: spread evenly, cap at what's left in daily window
+    const idealPerDay = Math.min(schedulableHours / daysAvailable, dailyHours);
+
     let remaining = schedulableHours;
     let scheduledForTask = 0;
 
-    while (remaining > 0) {
-      if (currentDayFilled >= dailyHours) {
-        dayOffset += 1;
-        currentDayFilled = 0;
-      }
-
-      const blockDate = offsetDate(todayStr, dayOffset);
+    for (let d = 0; d < daysAvailable && remaining > 0.001; d++) {
+      const blockDate = offsetDate(todayStr, d);
       if (blockDate > deadlineStr) break;
 
-      const dayAvailable = dailyHours - currentDayFilled;
-      const blockHours = Math.min(remaining, dayAvailable);
-      const blockStart = startHour + currentDayFilled;
-      const blockEnd = blockStart + blockHours;
+      // How much room is left in this day across all tasks?
+      const roomInDay = dailyHours - getDayUsed(blockDate);
+      if (roomInDay <= 0.001) continue; // day is full, skip to next
 
+      // Allocate up to idealPerDay for this task on this day,
+      // but never more than room available or remaining hours
+      const blockHours = Math.round(Math.min(idealPerDay, roomInDay, remaining) * 100) / 100;
+      if (blockHours <= 0) continue;
+
+      const dayStart = startHour + getDayUsed(blockDate);
       const block = {
         taskId: task.taskId,
         taskTitle: title,
         date: blockDate,
-        startTime: formatTime(blockStart),
-        endTime: formatTime(blockEnd),
+        startTime: formatTime(dayStart),
+        endTime: formatTime(dayStart + blockHours),
         durationHours: blockHours,
         status: "PLANNED",
         priorityScoreAtGeneration: task.priorityScore,
@@ -228,9 +246,9 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
 
       validateBlock(block);
       blocks.push(block);
+      addDayUsed(blockDate, blockHours);
       scheduledForTask += blockHours;
-      currentDayFilled += blockHours;
-      remaining -= blockHours;
+      remaining = Math.round((remaining - blockHours) * 100) / 100;
     }
 
     summary.totalScheduledHours += scheduledForTask;
@@ -260,6 +278,52 @@ const generateSchedule = (tasks, availability, { today } = {}) => {
 
   summary.totalScheduledHours =
     Math.round(summary.totalScheduledHours * 100) / 100;
+
+  // ── 4. Frequency/habit tasks — evenly-spaced reminder slots across today ──
+  for (const task of frequencyTasks) {
+    const title = task.taskTitle || task.sanitizedTitle || task.originalTitle || '';
+    const freq = Math.min(task.frequencyPerDay, 48);
+    const windowHours = endHour - startHour;
+    // Gap between each reminder (e.g. 8 reminders across 14h = every 1.75h)
+    const gapHours = windowHours / freq;
+    // Slot duration: 10% of gap, capped at 15 min, rounded to 2 decimal places
+    const slotDuration = Math.round(Math.min(gapHours * 0.1, 0.25) * 100) / 100 || 0.01;
+
+    const reminderBlocks = [];
+    for (let i = 0; i < freq; i++) {
+      const slotStart = startHour + i * gapHours;
+      const slotEnd = slotStart + slotDuration;
+      if (slotStart >= endHour) break;
+
+      const block = {
+        taskId: task.taskId,
+        taskTitle: title,
+        date: todayStr,
+        startTime: formatTime(slotStart),
+        endTime: formatTime(Math.min(slotEnd, endHour)),
+        durationHours: slotDuration,
+        status: 'PLANNED',
+        isReminder: true,
+        priorityScoreAtGeneration: task.priorityScore || 0,
+      };
+      validateBlock(block);
+      reminderBlocks.push(block);
+    }
+
+    blocks.push(...reminderBlocks);
+    taskStatuses.push({
+      taskId: task.taskId,
+      scheduleStatus: 'SCHEDULED',
+      feasible: true,
+      requiredHours: 0,
+      availableHours: windowHours,
+      deficitHours: 0,
+      reviewRequired: false,
+      reviewReason: null,
+      isFrequencyTask: true,
+      frequencyPerDay: freq,
+    });
+  }
 
   return { blocks, summary, taskStatuses };
 };

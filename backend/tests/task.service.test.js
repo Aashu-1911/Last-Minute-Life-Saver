@@ -46,14 +46,17 @@ const cleanFormData = (overrides = {}) => ({
   ...overrides,
 });
 
-// ─── Property 1a: Gemini flag passthrough ─────────────────────────────────────
+// ─── Property 1a: Backend rules are sole authority — Gemini flag is NOT passed through ───────────
 
-describe('Property 1a: Gemini reviewRequired flag passthrough', () => {
-  test('geminiReviewRequired=true always yields reviewRequired=true', () => {
+describe('Property 1a: Backend rules are sole authority for reviewRequired', () => {
+  test('geminiReviewRequired=true does NOT yield reviewRequired=true when no backend rule fires', () => {
     /**
-     * Generator: arbitrary estimatedHours, confidence, difficulty, description, deadline
-     * — all in the "clean" range so no backend rule fires.
-     * Only the Gemini flag is true.
+     * The implementation intentionally ignores Gemini's reviewRequired flag.
+     * Backend rules (hours range, confidence, blank desc + hard diff, past deadline) are
+     * the sole authority. When none of those fire, reviewRequired must be false regardless
+     * of what Gemini sent.
+     *
+     * Generator: all inputs safely in range so no backend rule fires.
      */
     const safeInputs = fc.record({
       estimatedHours: fc.float({ min: Math.fround(0.5), max: Math.fround(100), noNaN: true }),
@@ -65,10 +68,12 @@ describe('Property 1a: Gemini reviewRequired flag passthrough', () => {
 
     fc.assert(
       fc.property(safeInputs, ({ estimatedHours, confidence, description, difficulty, geminiReason }) => {
+        // geminiReviewRequired=true — but backend should still return false because no rule fires
         const aiPlan = cleanAiPlan({ estimatedHours, confidence, reviewRequired: true, reviewReason: geminiReason });
-        const formData = cleanFormData({ description, difficulty });
+        const formData = cleanFormData({ description, difficulty, deadline: FUTURE_DATE });
         const { reviewRequired } = applyReviewRequiredRules(aiPlan, formData);
-        return reviewRequired === true;
+        // Backend ignores Gemini's flag — should be false when no backend rule fires
+        return reviewRequired === false;
       }),
       { numRuns: 200 }
     );
@@ -203,15 +208,6 @@ describe('Property 1f: Combined — reviewRequired never false when any rule con
      * This ensures that any single condition is sufficient to set reviewRequired=true.
      */
     const triggeringScenario = fc.oneof(
-      // Gemini flag
-      fc.record({
-        estimatedHours: fc.float({ min: Math.fround(0.5), max: Math.fround(100), noNaN: true }),
-        confidence: fc.integer({ min: 70, max: 100 }),
-        geminiReviewRequired: fc.constant(true),
-        description: fc.string({ minLength: 1 }),
-        difficulty: fc.constantFrom('Easy', 'Medium'),
-        deadline: fc.constant(FUTURE_DATE),
-      }),
       // Rule 1a: hours too high
       fc.record({
         estimatedHours: fc.float({ min: Math.fround(100.01), max: Math.fround(10000), noNaN: true }),
@@ -359,12 +355,13 @@ describe('Property 2: Priority Score Bounds and Determinism', () => {
  *   - The Firestore document passed to saveTask must NOT contain a
  *     `suggestedPriorityScore` key, even when the aiPlan contains one.
  *
- * Property 7: Approve Recomputes reviewRequired Server-Side
- *   - Even if the client sends aiPlan.reviewRequired = false, the backend
- *     must recompute and set reviewRequired = true when any rule fires
- *     (e.g. confidence < 70 triggers Rule 2).
+ * Property 7: Approve Recomputes All Decision Metadata Server-Side
+ *   - approveTask calls decisionService.computeDecision (server-side recompute)
+ *   - The saved doc contains all v2 fields: compositeConfidence, reviewLevel,
+ *     reviewReason, reviewRequired, planningSnapshot, scheduledBy, taskMode
+ *   - When body.sourceTaskId is present, updateTask is called instead of saveTask
  *
- * Validates: Requirements 8.5, 11.2
+ * Validates: Requirements 1, 2, 4, 7, 8.5, 11.2, 12, 18
  */
 
 // Require approveTask directly from the service (already exported for testing)
@@ -372,14 +369,16 @@ const { approveTask } = require('../src/services/task.service');
 const firestoreService = require('../src/services/firestore.service');
 const priorityService = require('../src/services/priority.service');
 const geminiService = require('../src/services/gemini.service');
+const decisionService = require('../src/services/decision.service');
 
-// Mock dependencies so approveTask runs without real Firebase / Gemini
+// Mock dependencies so approveTask runs without real Firebase / Gemini / confidence/review logic
 jest.mock('../src/services/firestore.service');
 jest.mock('../src/services/priority.service');
 jest.mock('../src/services/gemini.service');
+jest.mock('../src/services/decision.service');
 
 /**
- * A minimal but fully valid aiPlan object (passes approveSchema).
+ * A minimal but fully valid aiPlan object.
  * Override individual fields per test.
  */
 const baseAiPlan = (overrides = {}) => ({
@@ -387,44 +386,67 @@ const baseAiPlan = (overrides = {}) => ({
   estimatedHours: 8,
   suggestedPriorityScore: 75,   // advisory only — must NOT be persisted
   confidence: 85,
-  reviewRequired: false,
+  reviewRequired: false,        // client value — ignored by backend
   reviewReason: '',
-  risks: [],
+  risks: [{ risk: 'Scope creep', probability: 'Medium', impact: 'High', mitigation: 'Define clear scope' }],
+  deliverables: ['Frontend', 'Backend API'],
+  reasoning: 'Task is well-defined with clear deliverables.',
+  aiSuggestions: ['Break work into phases'],
+  taskUnderstanding: {
+    goal: 'Build a landing page',
+    detectedRequirements: ['Responsive design', 'SEO'],
+    assumptions: ['Modern browser support'],
+    constraints: ['2 week deadline'],
+    planningStrategy: 'Sequential phases',
+  },
   subtasks: [{ name: 'Planning', hours: 2 }, { name: 'Execution', hours: 6 }],
   ...overrides,
 });
 
 /**
  * A minimal valid request body for approveTask.
- * Uses a future deadline so Rule 4 does not fire.
+ * Uses a future deadline so deadline rules do not fire.
  */
 const baseBody = (aiPlanOverrides = {}, bodyOverrides = {}) => ({
   title: 'Build the landing page',
   description: 'A detailed description of the task.',
-  category: 'Project',
-  taskType: 'Coding Project',
+  category: 'Work',
+  taskType: 'Deep Work',
   difficulty: 'Medium',
   deadline: '2099-12-31',
   importance: 3,
-  dailyAvailability: '4h',
+  dailyAvailability: '4-6 hours',
   preferredWorkingTime: 'Evening',
   attachments: [],
   aiPlan: baseAiPlan(aiPlanOverrides),
   ...bodyOverrides,
 });
 
+/** Default mock return for decisionService.computeDecision */
+const mockDecision = {
+  compositeConfidence: 88,
+  reviewLevel: 'NONE',
+  reviewReason: '',
+  reviewRequired: false,
+  urgencyScore: 10,
+  workloadScore: 1.2,
+};
+
 describe('Property 6: approveTask never stores suggestedPriorityScore', () => {
   let capturedDoc;
 
   beforeEach(() => {
     capturedDoc = null;
-    // Capture the document passed to saveTask
     firestoreService.saveTask.mockImplementation(async (doc) => {
       capturedDoc = doc;
       return { ...doc, taskId: 'mock-task-id', status: 'PENDING', createdAt: new Date() };
     });
-    // calculatePriority returns a fixed score — value doesn't matter for this property
+    firestoreService.updateTask.mockImplementation(async (taskId, doc) => {
+      capturedDoc = doc;
+      return { ...doc, taskId, updatedAt: new Date() };
+    });
     priorityService.calculatePriority.mockReturnValue(60);
+    decisionService.computeDecision.mockReturnValue(mockDecision);
   });
 
   afterEach(() => {
@@ -439,7 +461,6 @@ describe('Property 6: approveTask never stores suggestedPriorityScore', () => {
   });
 
   test('suggestedPriorityScore is absent regardless of the value supplied in aiPlan', async () => {
-    // Test a range of suggestedPriorityScore values the client might send
     for (const score of [0, 25, 50, 75, 100]) {
       capturedDoc = null;
       await approveTask(baseBody({ suggestedPriorityScore: score }), `req-score-${score}`);
@@ -456,7 +477,7 @@ describe('Property 6: approveTask never stores suggestedPriorityScore', () => {
   });
 });
 
-describe('Property 7: approveTask recomputes reviewRequired server-side', () => {
+describe('Property 7: approveTask recomputes all decision metadata server-side', () => {
   let capturedDoc;
 
   beforeEach(() => {
@@ -465,69 +486,308 @@ describe('Property 7: approveTask recomputes reviewRequired server-side', () => 
       capturedDoc = doc;
       return { ...doc, taskId: 'mock-task-id', status: 'PENDING', createdAt: new Date() };
     });
+    firestoreService.updateTask.mockImplementation(async (taskId, doc) => {
+      capturedDoc = doc;
+      return { ...doc, taskId, updatedAt: new Date() };
+    });
     priorityService.calculatePriority.mockReturnValue(50);
+    decisionService.computeDecision.mockReturnValue(mockDecision);
   });
 
   afterEach(() => {
     jest.clearAllMocks();
   });
 
-  test('client sends reviewRequired=false but Rule 2 (confidence<70) fires → saved doc has reviewRequired=true', async () => {
-    const body = baseBody({ reviewRequired: false, confidence: 30 });
-    // confidence: 30 < 70  → Rule 2 must fire and override the client's false
-
+  test('decisionService.computeDecision is called with aiPlan and body', async () => {
+    const body = baseBody();
     await approveTask(body, 'req-003');
 
-    expect(capturedDoc).not.toBeNull();
-    expect(capturedDoc.reviewRequired).toBe(true);
+    expect(decisionService.computeDecision).toHaveBeenCalledWith(body.aiPlan, body);
   });
 
-  test('client sends reviewRequired=false but Rule 1 (estimatedHours>100) fires → saved doc has reviewRequired=true', async () => {
-    const body = baseBody({ reviewRequired: false, estimatedHours: 200 });
+  test('saved doc contains reviewRequired from decisionService (server-computed)', async () => {
+    decisionService.computeDecision.mockReturnValue({ ...mockDecision, reviewRequired: true, reviewLevel: 'REQUIRED', reviewReason: 'Low confidence' });
+    const body = baseBody({ reviewRequired: false }); // client sends false — ignored
 
     await approveTask(body, 'req-004');
 
     expect(capturedDoc.reviewRequired).toBe(true);
+    expect(capturedDoc.reviewLevel).toBe('REQUIRED');
+    expect(capturedDoc.reviewReason).toBe('Low confidence');
   });
 
-  test('client sends reviewRequired=false but Rule 3 (blank description + Hard) fires → saved doc has reviewRequired=true', async () => {
-    const body = baseBody(
-      { reviewRequired: false },
-      { description: '', difficulty: 'Hard' }
+  test('saved doc has compositeConfidence from decisionService', async () => {
+    decisionService.computeDecision.mockReturnValue({ ...mockDecision, compositeConfidence: 72 });
+    await approveTask(baseBody(), 'req-005');
+
+    expect(capturedDoc.compositeConfidence).toBe(72);
+  });
+
+  test('saved doc has all v2 fields: taskUnderstanding, reasoning, deliverables, aiSuggestions', async () => {
+    await approveTask(baseBody(), 'req-006');
+
+    expect(capturedDoc).toHaveProperty('taskUnderstanding');
+    expect(capturedDoc).toHaveProperty('reasoning');
+    expect(capturedDoc).toHaveProperty('deliverables');
+    expect(capturedDoc).toHaveProperty('aiSuggestions');
+    expect(capturedDoc).toHaveProperty('reviewLevel');
+  });
+
+  test('saved doc has taskMode=ai, scheduledBy=AI, actualHours=null', async () => {
+    await approveTask(baseBody(), 'req-007');
+
+    expect(capturedDoc.taskMode).toBe('ai');
+    expect(capturedDoc.scheduledBy).toBe('AI');
+    expect(capturedDoc.actualHours).toBeNull();
+  });
+
+  test('saved doc contains planningSnapshot with correct fields', async () => {
+    const aiPlanOverrides = { confidence: 85, reasoning: 'Well scoped task.', deliverables: ['API', 'Docs'] };
+    decisionService.computeDecision.mockReturnValue({ ...mockDecision, compositeConfidence: 90, reviewLevel: 'NONE' });
+
+    await approveTask(baseBody(aiPlanOverrides), 'req-008');
+
+    expect(capturedDoc).toHaveProperty('planningSnapshot');
+    const snap = capturedDoc.planningSnapshot;
+    expect(snap.confidence).toBe(85);
+    expect(snap.compositeConfidence).toBe(90);
+    expect(snap.reviewLevel).toBe('NONE');
+    expect(snap.reasoning).toBe('Well scoped task.');
+    expect(snap.deliverables).toEqual(['API', 'Docs']);
+    expect(snap).toHaveProperty('risks');
+  });
+
+  test('when sourceTaskId present, updateTask is called instead of saveTask', async () => {
+    const body = baseBody({}, { sourceTaskId: 'quick-task-abc123' });
+    await approveTask(body, 'req-009');
+
+    expect(firestoreService.updateTask).toHaveBeenCalledWith('quick-task-abc123', expect.any(Object), 'req-009');
+    expect(firestoreService.saveTask).not.toHaveBeenCalled();
+  });
+
+  test('when sourceTaskId absent, saveTask is called (normal AI task flow)', async () => {
+    const body = baseBody();
+    await approveTask(body, 'req-010');
+
+    expect(firestoreService.saveTask).toHaveBeenCalled();
+    expect(firestoreService.updateTask).not.toHaveBeenCalled();
+  });
+});
+
+
+// ─── Properties 8 & 9: createQuickTask ───────────────────────────────────────
+
+/**
+ * Property 8: createQuickTask keyword-hour inference
+ *   - Title containing a keyword maps to the correct estimatedHours
+ *   - Titles with no keyword default to 0.5h
+ *   - The keyword with the first match wins
+ *
+ * Property 9: createQuickTask document shape
+ *   - Saved doc has taskMode='quick', scheduledBy='User', subtasks=[], status='PENDING'
+ *   - No null AI fields (no understanding, compositeConfidence, confidence, risks, etc.)
+ *   - priorityScore=0 when deadline is absent; priorityScore>0 when deadline is present
+ *   - Auto-detects category from title when body.category is not provided
+ *
+ * Validates: Requirements 11, 13, 18
+ */
+
+const { createQuickTask } = require('../src/services/task.service');
+
+// firestoreService and priorityService are already mocked above; reuse those mocks.
+
+describe('Property 8: createQuickTask keyword-hour inference', () => {
+  let capturedDoc;
+
+  beforeEach(() => {
+    capturedDoc = null;
+    firestoreService.saveTask.mockImplementation(async (doc) => {
+      capturedDoc = doc;
+      return { ...doc, taskId: 'mock-quick-id', createdAt: new Date() };
+    });
+    priorityService.calculatePriority.mockReturnValue(40);
+  });
+
+  afterEach(() => { jest.clearAllMocks(); });
+
+  const KEYWORD_CASES = [
+    ['Team meeting tomorrow', 'meeting', 1],
+    ['Call mentor about project', 'call', 0.5],
+    ['Read chapter 5', 'read', 0.5],
+    ['Submit assignment', 'submit', 0.25],
+    ['Send email to professor', 'email', 0.25],
+    ['Buy groceries', 'buy', 0.25],
+    ['Do something random', null, 0.5],   // no keyword → default 0.5
+  ];
+
+  test.each(KEYWORD_CASES)(
+    'title "%s" (keyword: %s) → estimatedHours=%d',
+    async (title, _keyword, expectedHours) => {
+      await createQuickTask({ title, importance: 3 }, 'req-kw');
+      expect(capturedDoc.estimatedHours).toBe(expectedHours);
+    }
+  );
+
+  test('property: title containing exactly one known keyword gets the correct hours', () => {
+    /**
+     * Build titles that contain exactly one keyword so the match is unambiguous.
+     * We pad with strings that cannot introduce other keywords.
+     */
+    const keywordExpected = { meeting: 1, call: 0.5, read: 0.5, submit: 0.25, email: 0.25, buy: 0.25 };
+    const OTHER_KEYWORDS = Object.keys(keywordExpected);
+
+    // Safe alphanumeric padding strings that contain none of the keywords
+    const safePadding = fc.stringOf(fc.mapToConstant(
+      { num: 26, build: (v) => String.fromCharCode(97 + v) }, // a-z
+    ), { minLength: 0, maxLength: 5 }).filter((s) => {
+      return !OTHER_KEYWORDS.some((kw) => s.toLowerCase().includes(kw));
+    });
+
+    return fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...Object.entries(keywordExpected)),
+        safePadding,
+        safePadding,
+        async ([keyword, expectedHours], prefix, suffix) => {
+          const title = `${prefix}${keyword}${suffix}`.trim() || keyword;
+          // Verify no OTHER keyword sneaked in via prefix/suffix
+          const titleLower = title.toLowerCase();
+          const matchedKeywords = OTHER_KEYWORDS.filter((kw) => titleLower.includes(kw));
+          // If multiple keywords match, skip this sample (can't guarantee winner)
+          if (matchedKeywords.length > 1) return true;
+
+          capturedDoc = null;
+          firestoreService.saveTask.mockImplementation(async (doc) => {
+            capturedDoc = doc;
+            return { ...doc, taskId: 'kw-test' };
+          });
+          await createQuickTask({ title, importance: 3 }, 'req-prop-kw');
+          return capturedDoc.estimatedHours === expectedHours;
+        }
+      ),
+      { numRuns: 100 }
     );
-
-    await approveTask(body, 'req-005');
-
-    expect(capturedDoc.reviewRequired).toBe(true);
   });
 
-  test('client sends reviewRequired=false but Rule 4 (past deadline) fires → saved doc has reviewRequired=true', async () => {
-    const body = baseBody(
-      { reviewRequired: false },
-      { deadline: '2020-01-01' }
+  test('title with no keyword defaults to estimatedHours=0.5', () => {
+    // Titles that contain none of the known keywords
+    const noKeywordTitles = fc.string({ minLength: 3 }).filter((s) => {
+      const lower = s.toLowerCase();
+      return !['meeting', 'call', 'read', 'submit', 'email', 'buy'].some((kw) => lower.includes(kw));
+    });
+
+    return fc.assert(
+      fc.asyncProperty(noKeywordTitles, async (title) => {
+        capturedDoc = null;
+        firestoreService.saveTask.mockImplementation(async (doc) => {
+          capturedDoc = doc;
+          return { ...doc, taskId: 'default-hours' };
+        });
+        await createQuickTask({ title, importance: 3 }, 'req-default');
+        return capturedDoc.estimatedHours === 0.5;
+      }),
+      { numRuns: 100 }
     );
+  });
+});
 
-    await approveTask(body, 'req-006');
+describe('Property 9: createQuickTask document shape', () => {
+  let capturedDoc;
 
-    expect(capturedDoc.reviewRequired).toBe(true);
+  beforeEach(() => {
+    capturedDoc = null;
+    firestoreService.saveTask.mockImplementation(async (doc) => {
+      capturedDoc = doc;
+      return { ...doc, taskId: 'mock-shape-id', createdAt: new Date() };
+    });
+    priorityService.calculatePriority.mockReturnValue(55);
   });
 
-  test('all rules clean → reviewRequired remains false as supplied by client', async () => {
-    // confidence >= 70, estimatedHours in range, description provided,
-    // difficulty not hard, deadline well in the future, gemini flag false
-    const body = baseBody({ reviewRequired: false, confidence: 85, estimatedHours: 8 });
+  afterEach(() => { jest.clearAllMocks(); });
 
-    await approveTask(body, 'req-007');
+  const AI_ONLY_FIELDS = [
+    'understanding', 'compositeConfidence', 'confidence', 'risks', 'deliverables',
+    'aiSuggestions', 'taskUnderstanding', 'reasoning', 'explainability',
+    'reviewLevel', 'reviewReason', 'reviewRequired', 'planningSnapshot',
+    'taskType', 'difficulty',
+  ];
 
-    expect(capturedDoc.reviewRequired).toBe(false);
+  test('taskMode=quick, scheduledBy=User, subtasks=[], status=PENDING (set on taskDoc)', async () => {
+    await createQuickTask({ title: 'Buy coffee', importance: 3 }, 'req-shape-1');
+
+    expect(capturedDoc.taskMode).toBe('quick');
+    expect(capturedDoc.scheduledBy).toBe('User');
+    expect(capturedDoc.subtasks).toEqual([]);
+    expect(capturedDoc.status).toBe('PENDING');
   });
 
-  test('reviewReason is a non-empty string when Rule 2 fires', async () => {
-    const body = baseBody({ reviewRequired: false, confidence: 30 });
+  test('no null AI-only fields are included in the document', async () => {
+    await createQuickTask({ title: 'Read chapter 3', importance: 2 }, 'req-shape-2');
 
-    await approveTask(body, 'req-008');
+    for (const field of AI_ONLY_FIELDS) {
+      expect(capturedDoc).not.toHaveProperty(field);
+    }
+  });
 
-    expect(typeof capturedDoc.reviewReason).toBe('string');
-    expect(capturedDoc.reviewReason.length).toBeGreaterThan(0);
+  test('priorityScore=0 when deadline is absent', async () => {
+    await createQuickTask({ title: 'Quick note', importance: 3 }, 'req-no-deadline');
+
+    expect(capturedDoc.priorityScore).toBe(0);
+    expect(priorityService.calculatePriority).not.toHaveBeenCalled();
+  });
+
+  test('priorityScore is computed when deadline is present', async () => {
+    priorityService.calculatePriority.mockReturnValue(72);
+    await createQuickTask({ title: 'Submit form', deadline: '2099-06-30', importance: 4 }, 'req-with-deadline');
+
+    expect(priorityService.calculatePriority).toHaveBeenCalled();
+    expect(capturedDoc.priorityScore).toBe(72);
+  });
+
+  test('actualHours is null, attachments is empty array', async () => {
+    await createQuickTask({ title: 'Team meeting', importance: 3 }, 'req-shape-3');
+
+    expect(capturedDoc.actualHours).toBeNull();
+    expect(capturedDoc.attachments).toEqual([]);
+  });
+
+  test('category falls back to historyService inference when not provided', async () => {
+    // "meeting" is a keyword in historyService CATEGORY_KEYWORDS → maps to 'meeting'
+    await createQuickTask({ title: 'standup meeting', importance: 3 }, 'req-cat-infer');
+
+    expect(capturedDoc.category).toBe('meeting');
+  });
+
+  test('explicit body.category takes precedence over title inference', async () => {
+    await createQuickTask({ title: 'standup meeting', category: 'work', importance: 3 }, 'req-cat-explicit');
+
+    expect(capturedDoc.category).toBe('work');
+  });
+
+  test('optional fields present in body are persisted', async () => {
+    const body = {
+      title: 'Evening call',
+      importance: 2,
+      description: 'Weekly sync',
+      preferredWorkingTime: 'Evening',
+      dailyAvailability: '1-2 hours',
+      experienceLevel: 'Comfortable',
+      timePreference: 'Evening',
+      energyLevel: 'Normal',
+    };
+    await createQuickTask(body, 'req-optional');
+
+    expect(capturedDoc.description).toBe('Weekly sync');
+    expect(capturedDoc.preferredWorkingTime).toBe('Evening');
+    expect(capturedDoc.dailyAvailability).toBe('1-2 hours');
+    expect(capturedDoc.experienceLevel).toBe('Comfortable');
+    expect(capturedDoc.timePreference).toBe('Evening');
+    expect(capturedDoc.energyLevel).toBe('Normal');
+  });
+
+  test('throws AppError when title is empty after sanitization', async () => {
+    await expect(createQuickTask({ title: '   ', importance: 3 }, 'req-empty')).rejects.toMatchObject({
+      statusCode: 400,
+    });
   });
 });

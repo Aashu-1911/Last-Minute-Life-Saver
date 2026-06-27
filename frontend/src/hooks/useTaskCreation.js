@@ -17,6 +17,12 @@ const INITIAL_DRAFT = {
   dailyAvailability: '',
   preferredWorkingTime: '',
   attachments: [],
+  experienceLevel: 'Comfortable',
+  timePreference: '',
+  energyLevel: '',
+  isRecurring: false,
+  recurringInterval: '',
+  frequencyPerDay: '',
 };
 
 const INITIAL_STATE = {
@@ -28,6 +34,9 @@ const INITIAL_STATE = {
   loading: false,
   error: null,
 };
+
+const INITIAL_MODE = 'ai';       // 'quick' | 'ai'
+const INITIAL_SOURCE_TASK_ID = null;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const MAX_ATTACHMENTS = 5;
@@ -45,13 +54,51 @@ export function useTaskCreation() {
   const [state, setState] = useState(INITIAL_STATE);
 
   // -------------------------------------------------------------------------
-  // updateDraft — update a single field in draftTask
+  // mode — 'quick' | 'ai'
   // -------------------------------------------------------------------------
-  const updateDraft = (field, value) => {
-    setState((prev) => ({
-      ...prev,
-      draftTask: { ...prev.draftTask, [field]: value },
-    }));
+  const [mode, setMode] = useState(INITIAL_MODE);
+
+  // -------------------------------------------------------------------------
+  // sourceTaskId — ID of the quick task being upgraded to an AI plan
+  // -------------------------------------------------------------------------
+  const [sourceTaskId, setSourceTaskId] = useState(INITIAL_SOURCE_TASK_ID);
+
+  // -------------------------------------------------------------------------
+  // updateDraft — update a single field (or merge an object) in draftTask
+  // -------------------------------------------------------------------------
+  const updateDraft = (fieldOrObject, value) => {
+    if (typeof fieldOrObject === 'object' && fieldOrObject !== null) {
+      // Called with an object — merge all fields at once (e.g. planThisTask)
+      setState((prev) => ({
+        ...prev,
+        draftTask: { ...prev.draftTask, ...fieldOrObject },
+      }));
+    } else {
+      setState((prev) => ({
+        ...prev,
+        draftTask: { ...prev.draftTask, [fieldOrObject]: value },
+      }));
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // switchMode — change between 'quick' and 'ai'; preserves shared fields
+  // title, deadline, and importance carry over between modes
+  // -------------------------------------------------------------------------
+  const switchMode = (newMode) => {
+    setMode(newMode);
+    // When switching to AI mode, clear quick-task-only fields from draft
+    if (newMode === 'ai') {
+      setState((prev) => ({
+        ...prev,
+        draftTask: {
+          ...prev.draftTask,
+          isRecurring: false,
+          recurringInterval: '',
+          frequencyPerDay: '',
+        },
+      }));
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -120,8 +167,11 @@ export function useTaskCreation() {
 
   // -------------------------------------------------------------------------
   // submitForPreview — POST to /preview; handle AI_Plan or clarification
+  // Accepts optional overrides for assumption correction replan flow (Task 17):
+  //   _corrections: string[]  — user-supplied corrections (kept separate from description)
+  //   _isClarificationResubmit: boolean — enforces 1-round clarification limit
   // -------------------------------------------------------------------------
-  const submitForPreview = async () => {
+  const submitForPreview = async (overrides = {}) => {
     setState((prev) => ({
       ...prev,
       uiState: 'loading',
@@ -130,7 +180,20 @@ export function useTaskCreation() {
     }));
 
     try {
-      const result = await taskService.previewTask(state.draftTask);
+      const OPTIONAL_FIELDS = [
+        'description', 'category', 'taskType', 'difficulty', 'preferredWorkingTime',
+        'dailyAvailability', 'experienceLevel', 'timePreference', 'energyLevel', 'recurringInterval',
+        // quick-task-only fields — never sent to the AI planner endpoint
+        'frequencyPerDay', 'isRecurring',
+      ];
+      const cleaned = { ...state.draftTask, ...overrides };
+      OPTIONAL_FIELDS.forEach((f) => {
+        if (cleaned[f] === '' || cleaned[f] === null || cleaned[f] === undefined || cleaned[f] === false) {
+          delete cleaned[f];
+        }
+      });
+      const payload = cleaned;
+      const result = await taskService.previewTask(payload);
 
       if (result.clarificationRequired === true) {
         setState((prev) => ({
@@ -222,13 +285,34 @@ export function useTaskCreation() {
     setState((prev) => ({ ...prev, loading: true, error: null }));
 
     try {
-      await taskService.approveTask({
-        ...state.draftTask,
-        aiPlan: state.previewTask,
+      // Strip quick-task-only fields — approveSchema doesn't allow them
+      const QUICK_ONLY_FIELDS = ['frequencyPerDay', 'isRecurring', 'recurringInterval'];
+      const draftClean = { ...state.draftTask };
+      QUICK_ONLY_FIELDS.forEach((f) => { delete draftClean[f]; });
+      // Also strip empty-string optional enum fields to avoid Joi rejection
+      const OPTIONAL_ENUMS = [
+        'category', 'taskType', 'difficulty', 'dailyAvailability',
+        'preferredWorkingTime', 'experienceLevel', 'timePreference', 'energyLevel',
+      ];
+      OPTIONAL_ENUMS.forEach((f) => {
+        if (draftClean[f] === '' || draftClean[f] === null) delete draftClean[f];
       });
 
-      // Success: reset form state, then refresh task list
+      const payload = {
+        ...draftClean,
+        aiPlan: state.previewTask,
+      };
+
+      // Include sourceTaskId when upgrading a quick task to an AI plan
+      if (sourceTaskId) {
+        payload.sourceTaskId = sourceTaskId;
+      }
+
+      await taskService.approveTask(payload);
+
+      // Success: reset form state and sourceTaskId, then refresh task list
       setState(INITIAL_STATE);
+      setSourceTaskId(INITIAL_SOURCE_TASK_ID);
       await fetchTasks();
     } catch (err) {
       // Preserve preview state — user can retry or cancel
@@ -240,6 +324,63 @@ export function useTaskCreation() {
           'Something went wrong — please try again.',
       }));
     }
+  };
+
+  // -------------------------------------------------------------------------
+  // saveQuickTask — create a quick task without AI planning
+  // -------------------------------------------------------------------------
+  const saveQuickTask = async () => {
+    setState((prev) => ({ ...prev, loading: true, error: null }));
+
+    try {
+      // Whitelist only the fields that quickTaskSchema accepts.
+      // This prevents AI-planner fields (taskType, difficulty, etc.) from leaking
+      // into the quick task payload when the draft was pre-filled by planThisTask.
+      const QUICK_TASK_FIELDS = [
+        'title', 'importance', 'category',
+        'preferredWorkingTime', 'isRecurring', 'recurringInterval',
+        'frequencyPerDay',
+      ];
+      const payload = {};
+      QUICK_TASK_FIELDS.forEach((f) => {
+        const val = state.draftTask[f];
+        // Include field only when it has a real value (skip empty strings, null, undefined)
+        if (val !== '' && val !== null && val !== undefined) {
+          payload[f] = val;
+        }
+      });
+      // Quick tasks are always due today
+      payload.deadline = new Date().toISOString().slice(0, 10);
+      // isRecurring false is meaningful — include it explicitly
+      if (typeof state.draftTask.isRecurring === 'boolean') {
+        payload.isRecurring = state.draftTask.isRecurring;
+      }
+
+      await taskService.createQuickTask(payload);
+
+      // Success: reset state
+      setState(INITIAL_STATE);
+      setMode(INITIAL_MODE);
+      setSourceTaskId(INITIAL_SOURCE_TASK_ID);
+      await fetchTasks();
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        loading: false,
+        error:
+          err.response?.data?.error ||
+          'Something went wrong — please try again.',
+      }));
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // planThisTask — pre-fill AI form from an existing quick task
+  // -------------------------------------------------------------------------
+  const planThisTask = (task) => {
+    setMode('ai');
+    updateDraft({ ...task });
+    setSourceTaskId(task.taskId);
   };
 
   // -------------------------------------------------------------------------
@@ -270,6 +411,8 @@ export function useTaskCreation() {
   // -------------------------------------------------------------------------
   const cancel = () => {
     setState(INITIAL_STATE);
+    setMode(INITIAL_MODE);
+    setSourceTaskId(INITIAL_SOURCE_TASK_ID);
   };
 
   // -------------------------------------------------------------------------
@@ -294,13 +437,19 @@ export function useTaskCreation() {
     clarificationAnswers,
     loading,
     error,
+    // Mode and source task state
+    mode,
+    sourceTaskId,
     // Actions
     updateDraft,
+    switchMode,
     addAttachment,
     removeAttachment,
     submitForPreview,
     submitClarification,
     approveTask,
+    saveQuickTask,
+    planThisTask,
     edit,
     backToPreview,
     cancel,

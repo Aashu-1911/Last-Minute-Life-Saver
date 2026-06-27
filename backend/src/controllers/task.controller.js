@@ -37,4 +37,43 @@ const approveTask = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, task });
 });
 
-module.exports = { createTask, getAllTasks, previewTask, approveTask };
+/**
+ * POST /api/v1/tasks/quick
+ * Creates a quick task (no AI planning); returns HTTP 201 with the saved task.
+ */
+const createQuickTask = asyncHandler(async (req, res) => {
+  const task = await taskService.createQuickTask(req.body, req.requestId);
+  res.status(201).json({ success: true, task });
+});
+
+/**
+ * PATCH /api/v1/tasks/:taskId/complete
+ * Marks a task as COMPLETED (or toggles back to PENDING).
+ */
+const completeTask = asyncHandler(async (req, res) => {
+  const { taskId } = req.params;
+  const { status = 'COMPLETED' } = req.body;
+  const allowed = ['COMPLETED', 'PENDING', 'IN_PROGRESS'];
+  if (!allowed.includes(status)) {
+    return res.status(400).json({ success: false, error: `status must be one of ${allowed.join(', ')}` });
+  }
+  await taskService.updateTaskStatus(taskId, status, req.requestId);
+  res.status(200).json({ success: true, taskId, status });
+});
+
+/**
+ * PATCH /api/v1/tasks/:taskId/subtasks/:index/complete
+ * Toggles a subtask's completed state by index.
+ */
+const completeSubtask = asyncHandler(async (req, res) => {
+  const { taskId, index } = req.params;
+  const idx = parseInt(index, 10);
+  if (isNaN(idx) || idx < 0) {
+    return res.status(400).json({ success: false, error: 'index must be a non-negative integer' });
+  }
+  const { completed } = req.body;
+  const updatedSubtasks = await taskService.toggleSubtask(taskId, idx, !!completed, req.requestId);
+  res.status(200).json({ success: true, taskId, subtasks: updatedSubtasks });
+});
+
+module.exports = { createTask, getAllTasks, previewTask, approveTask, createQuickTask, completeTask, completeSubtask };

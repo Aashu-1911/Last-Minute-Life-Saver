@@ -17,11 +17,17 @@ jest.mock('../src/config/gemini', () => ({ generateContent: jest.fn() }));
 jest.mock('../src/services/gemini.service');
 // Mock firestoreService to prevent any real DB calls.
 jest.mock('../src/services/firestore.service');
+// Mock history and priority services to prevent real calls in quick task route.
+jest.mock('../src/services/history.service');
+jest.mock('../src/services/priority.service');
 
 const request = require('supertest');
 const fc = require('fast-check');
 const app = require('../src/app');
 const geminiService = require('../src/services/gemini.service');
+const firestoreService = require('../src/services/firestore.service');
+const historyService = require('../src/services/history.service');
+const priorityService = require('../src/services/priority.service');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -127,5 +133,118 @@ describe('Property 3: Clarification Loop Never Exceeds 1 Round', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.clarificationRequired).toBe(true);
+  });
+});
+
+
+// ── POST /api/v1/tasks/quick — Quick Task creation ────────────────────────────
+
+/**
+ * Tests for the POST /quick route.
+ * Validates HTTP 201 response, taskMode field, and input validation.
+ *
+ * **Validates: Requirements 2, 11, 12, 19**
+ */
+describe('POST /api/v1/tasks/quick — Quick Task creation', () => {
+  beforeEach(() => {
+    // Mock firestoreService.saveTask to return a simulated saved document
+    firestoreService.saveTask.mockImplementation(async (doc) => ({
+      ...doc,
+      taskId: 'test-quick-id',
+      createdAt: new Date(),
+    }));
+
+    // historyService.inferCategoryFromTitle: return null to avoid real inference
+    historyService.inferCategoryFromTitle.mockReturnValue(null);
+
+    // priorityService.calculatePriority: return 0
+    priorityService.calculatePriority.mockReturnValue(0);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('POST /quick with valid body returns HTTP 201 with success=true and taskMode=quick', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'Buy coffee', importance: 3 });
+
+    expect(response.status).toBe(201);
+    expect(response.body.success).toBe(true);
+    expect(response.body.task).toBeDefined();
+    expect(response.body.task.taskMode).toBe('quick');
+  });
+
+  test('POST /quick with minimum required fields (title only) returns HTTP 201', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'Drink water' });
+
+    expect(response.status).toBe(201);
+    expect(response.body.success).toBe(true);
+  });
+
+  test('POST /quick with optional fields returns HTTP 201', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({
+        title: 'Team meeting prep',
+        importance: 4,
+        description: 'Prepare slides for the team sync',
+        deadline: '2099-06-30',
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.task.taskMode).toBe('quick');
+  });
+
+  test('POST /quick missing title returns HTTP 400', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ importance: 3 });
+
+    expect(response.status).toBe(400);
+  });
+
+  test('POST /quick title too short (< 3 chars) returns HTTP 400', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'ab', importance: 3 });
+
+    expect(response.status).toBe(400);
+  });
+
+  test('POST /quick invalid importance value (0) returns HTTP 400', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'Valid title here', importance: 0 });
+
+    expect(response.status).toBe(400);
+  });
+
+  test('POST /quick invalid importance value (6) returns HTTP 400', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'Valid title here', importance: 6 });
+
+    expect(response.status).toBe(400);
+  });
+
+  test('POST /quick response body has taskId from saveTask mock', async () => {
+    const response = await request(app)
+      .post('/api/v1/tasks/quick')
+      .set('Content-Type', 'application/json')
+      .send({ title: 'Submit assignment', importance: 2 });
+
+    expect(response.status).toBe(201);
+    expect(response.body.task.taskId).toBe('test-quick-id');
   });
 });
